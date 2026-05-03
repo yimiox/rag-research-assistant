@@ -1,5 +1,5 @@
 """
-generator.py — Ollama (local) with HF Inference API fallback (for HF Spaces)
+generator.py — HF Inference API (conversational) with Ollama local fallback
 """
 
 import os
@@ -13,7 +13,7 @@ MAX_CONTEXT   = 3800
 HF_TOKEN      = os.getenv("HF_TOKEN", "")
 
 
-def _build_prompt(query: str, chunks: List[Dict]) -> str:
+def _build_context(query: str, chunks: List[Dict]) -> tuple[str, str]:
     context_parts = []
     for i, chunk in enumerate(chunks, start=1):
         context_parts.append(
@@ -23,21 +23,23 @@ def _build_prompt(query: str, chunks: List[Dict]) -> str:
     context = "\n\n---\n\n".join(context_parts)
     if len(context) > MAX_CONTEXT:
         context = context[:MAX_CONTEXT] + "...[truncated]"
-
-    return f"""<s>[INST] You are a research assistant. Answer using ONLY the context below.
-Cite sources inline as [1], [2] etc. If answer not in context, say so.
-
-CONTEXT:
-{context}
-
-QUESTION: {query} [/INST]"""
+    return context, query
 
 
-def _try_ollama(prompt: str, model: str) -> Optional[str]:
+def _try_ollama(query: str, context: str, model: str) -> Optional[str]:
     try:
         requests.get("http://localhost:11434", timeout=3)
     except Exception:
         return None
+    prompt = f"""You are a research assistant. Answer using ONLY the context below.
+Cite sources inline as [1], [2] etc.
+
+CONTEXT:
+{context}
+
+QUESTION: {query}
+
+ANSWER:"""
     try:
         resp = requests.post(
             OLLAMA_URL,
@@ -51,20 +53,27 @@ def _try_ollama(prompt: str, model: str) -> Optional[str]:
         return f"Ollama error: {exc}"
 
 
-def _try_hf(prompt: str) -> Optional[str]:
+def _try_hf(query: str, context: str) -> Optional[str]:
     if not HF_TOKEN:
         return None
     try:
         from huggingface_hub import InferenceClient
-        client = InferenceClient(model=HF_MODEL, token=HF_TOKEN)
-        result = client.text_generation(
-            prompt,
-            max_new_tokens=512,
-            temperature=0.1,
-            do_sample=True,
+        client = InferenceClient(token=HF_TOKEN)
+        system = (
+            "You are a research assistant. Answer using ONLY the provided context. "
+            "Cite sources inline as [1], [2] etc. If answer not in context, say so."
         )
-        # Strip the prompt from the result if echoed back
-        return result.replace(prompt, "").strip()
+        user_msg = f"CONTEXT:\n{context}\n\nQUESTION: {query}"
+        result = client.chat_completion(
+            model=HF_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_msg},
+            ],
+            max_tokens=512,
+            temperature=0.1,
+        )
+        return result.choices[0].message.content.strip()
     except Exception as exc:
         return f"HF error: {exc}"
 
@@ -73,17 +82,13 @@ def generate_answer(query: str, chunks: List[Dict], model: str = DEFAULT_MODEL) 
     if not chunks:
         return "No relevant context found. Please ingest documents first.", ""
 
-    prompt = _build_prompt(query, chunks)
+    context, _ = _build_context(query, chunks)
 
-    answer = _try_ollama(prompt, model)
+    answer = _try_ollama(query, context, model)
     if answer is None:
-        answer = _try_hf(prompt)
+        answer = _try_hf(query, context)
     if answer is None:
-        answer = (
-            "No LLM available.\n\n"
-            "Local: `ollama pull phi3` then restart app\n"
-            "Cloud: set HF_TOKEN in Space secrets"
-        )
+        answer = "No LLM available. Set HF_TOKEN in Space secrets."
 
     return answer, _build_citations(chunks)
 
