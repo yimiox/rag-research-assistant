@@ -8,7 +8,7 @@ import requests
 
 OLLAMA_URL    = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "llama3"
-HF_MODEL      = "mistralai/Mistral-7B-Instruct-v0.3"
+HF_MODEL      = "meta-llama/Meta-Llama-3-8B-Instruct"
 MAX_CONTEXT   = 3800
 HF_TOKEN      = os.getenv("HF_TOKEN", "")
 
