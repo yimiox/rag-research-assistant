@@ -1,14 +1,3 @@
----
-title: RAG Research Assistant
-emoji: 📚
-colorFrom: indigo
-colorTo: blue
-sdk: gradio
-sdk_version: "4.0"
-app_file: app.py
-pinned: false
----
-
 # RAG Research Assistant
 
 Local Retrieval-Augmented Generation pipeline. Upload PDFs → ask questions → get cited answers.

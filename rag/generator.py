@@ -1,15 +1,16 @@
 """
-generator.py — build prompt from retrieved chunks, call Ollama, return answer + citations
+generator.py — Ollama (local) with HF fallback
 """
 
-import re
-from typing import List, Dict
-
+import os
+from typing import List, Dict, Optional
 import requests
 
-OLLAMA_URL   = "http://localhost:11434/api/generate"
-DEFAULT_MODEL = "llama3"          # swap for mistral, phi3, etc.
-MAX_CONTEXT  = 3800               # characters of context sent to LLM
+OLLAMA_URL    = "http://localhost:11434/api/generate"
+DEFAULT_MODEL = "llama3"
+HF_MODEL      = "mistralai/Mistral-7B-Instruct-v0.3"
+MAX_CONTEXT   = 3800
+HF_TOKEN      = os.getenv("HF_TOKEN", "")
 
 
 def _build_prompt(query: str, chunks: List[Dict]) -> str:
@@ -20,12 +21,10 @@ def _build_prompt(query: str, chunks: List[Dict]) -> str:
             f"{chunk['chunk_text']}"
         )
     context = "\n\n---\n\n".join(context_parts)
-
-    # Trim if too long
     if len(context) > MAX_CONTEXT:
         context = context[:MAX_CONTEXT] + "...[truncated]"
 
-    prompt = f"""You are a research assistant. Answer the question using ONLY the provided context.
+    return f"""You are a research assistant. Answer the question using ONLY the provided context.
 For every claim, cite the source number in square brackets like [1] or [2].
 If the answer is not in the context, say "I couldn't find relevant information."
 
@@ -35,21 +34,14 @@ CONTEXT:
 QUESTION: {query}
 
 ANSWER (with inline citations):"""
-    return prompt
 
 
-def generate_answer(
-    query: str,
-    chunks: List[Dict],
-    model: str = DEFAULT_MODEL,
-) -> tuple[str, str]:
-    """
-    Returns (answer_text, citations_block).
-    """
-    if not chunks:
-        return "No relevant context found. Please ingest documents first.", ""
-
-    prompt = _build_prompt(query, chunks)
+def _try_ollama(prompt: str, model: str) -> Optional[str]:
+    try:
+        # First ping to check if Ollama is up
+        requests.get("http://localhost:11434", timeout=3)
+    except Exception:
+        return None  # Ollama not running
 
     try:
         resp = requests.post(
@@ -60,22 +52,48 @@ def generate_answer(
                 "stream": False,
                 "options": {"temperature": 0.1, "num_predict": 512},
             },
-            timeout=120,
+            timeout=300,  # 5 min — first load is slow
         )
         resp.raise_for_status()
-        answer = resp.json().get("response", "").strip()
-    except requests.exceptions.ConnectionError:
-        return (
-            "Ollama not running. Start it with: `ollama serve` "
-            "then `ollama pull llama3`",
-            "",
-        )
+        return resp.json().get("response", "").strip()
     except Exception as exc:
-        return f"LLM error: {exc}", ""
+        return f"Ollama error: {exc}"
 
-    # Build citations block
-    citations = _build_citations(chunks)
-    return answer, citations
+
+def _try_hf(prompt: str) -> Optional[str]:
+    if not HF_TOKEN:
+        return None
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 512, "temperature": 0.1}}
+    try:
+        url  = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list):
+            return data[0].get("generated_text", "").replace(prompt, "").strip()
+        return str(data)
+    except Exception as exc:
+        return f"HF error: {exc}"
+
+
+def generate_answer(query: str, chunks: List[Dict], model: str = DEFAULT_MODEL) -> tuple[str, str]:
+    if not chunks:
+        return "No relevant context found. Please ingest documents first.", ""
+
+    prompt = _build_prompt(query, chunks)
+    answer = _try_ollama(prompt, model)
+    if answer is None:
+        answer = _try_hf(prompt)
+    if answer is None:
+        answer = (
+            "No LLM available.\n\n"
+            "1. Open Ollama desktop app\n"
+            "2. Run in terminal: ollama pull llama3\n"
+            "3. Try again"
+        )
+
+    return answer, _build_citations(chunks)
 
 
 def _build_citations(chunks: List[Dict]) -> str:
